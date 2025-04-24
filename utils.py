@@ -23,3 +23,20 @@ def spring_constant(x_i, x_j, alpha):
 def spring_energy(x_i, x_j):
     s_ij = np.linalg.norm(x_i) - np.linalg.norm(x_j)
     return 0.5 * (s_ij - 1) ** 2
+
+
+def matrix_cosine_sim(X: np.ndarray):
+    norm = np.linalg.norm(X, axis=1)
+    dot = X @ X.T
+    norm = np.outer(norm, norm)
+    cosine_sim = dot / (norm + 1e-9)
+    return np.clip(cosine_sim, -1, 1)
+
+
+def scaled_cosine_sim(X: np.ndarray, k: int = 1):
+    """
+    Compute the k-th power of the cosine similarities of vectors in X scaled to [0, 1].
+    """
+    cosine_sim = matrix_cosine_sim(X)
+    scaled = (cosine_sim + 1) / 2
+    return np.power(scaled, k)

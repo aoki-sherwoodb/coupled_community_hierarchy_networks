@@ -5,6 +5,7 @@ from matplotlib.patches import Patch
 from sklearn.cluster import KMeans, SpectralClustering
 from sklearn.metrics import silhouette_score
 from sklearn.manifold import TSNE
+from sklearn.decomposition import PCA
 
 
 class NetworkEmbeddingModel:
@@ -71,11 +72,14 @@ class NetworkEmbeddingModel:
     def visualize(
         self,
         embeddings=None,
+        node_labels=None,
         adj_matrix=None,
         communities=None,
         show_magnitudes=True,
         node_size_base=100,
-        figsize=(12, 10),
+        figsize=(20, 16),
+        title=None,
+        dim_reduction="pca",
     ):
         """
         Visualize the network with embeddings.
@@ -100,6 +104,10 @@ class NetworkEmbeddingModel:
         assert (
             adj_matrix is not None or self.adj_matrix is not None
         ), "Either adj_matrix or self.adj_matrix must be provided for visualization"
+        assert dim_reduction in [
+            "pca",
+            "tsne",
+        ], "dim_reduction must be either 'pca' or 'tsne'"
         if embeddings is None:
             embeddings = self.embeddings
 
@@ -107,8 +115,15 @@ class NetworkEmbeddingModel:
             adj_matrix = self.adj_matrix
 
         # Create graph from adjacency matrix
-        G = nx.from_numpy_array(adj_matrix)
-
+        G = nx.from_numpy_array(adj_matrix, create_using=nx.DiGraph)
+        if node_labels is not None:
+            # Use provided node labels
+            assert (
+                len(node_labels) == self.num_nodes
+            ), "Node labels must match number of nodes"
+            G = nx.relabel_nodes(G, {i: node_labels[i] for i in range(self.num_nodes)})
+        else:
+            node_labels = list(G.nodes())
         # Node sizes based on magnitudes (ranks)
         if show_magnitudes:
             magnitudes = self.get_node_ranks(embeddings)
@@ -121,14 +136,21 @@ class NetworkEmbeddingModel:
         # Get positions from embeddings
         if embeddings.shape[1] > 2:
             # Reduce to 2D using t-SNE
-            embeddings_2d = TSNE(n_components=2, random_state=42).fit_transform(
-                embeddings
-            )
+            if dim_reduction == "tsne":
+                embeddings_2d = TSNE(n_components=2, random_state=42).fit_transform(
+                    embeddings
+                )
+            else:
+                # reduce using PCA
+                embeddings_2d = PCA(n_components=2, random_state=42).fit_transform(
+                    embeddings
+                )
         else:
             embeddings_2d = embeddings[:, :2]
 
         pos = {
-            i: (embeddings_2d[i, 0], embeddings_2d[i, 1]) for i in range(self.num_nodes)
+            node_labels[i]: (embeddings_2d[i, 0], embeddings_2d[i, 1])
+            for i in range(len(node_labels))
         }
 
         # Plot
@@ -154,7 +176,9 @@ class NetworkEmbeddingModel:
         else:
             nx.draw_networkx_nodes(G, pos, node_size=node_sizes, alpha=0.8)
 
-        nx.draw_networkx_edges(G, pos, alpha=0.2)
+        nx.draw_networkx_edges(
+            G, pos, arrowsize=20, connectionstyle="arc3,rad=0.1", edge_color="0.5"
+        )
         nx.draw_networkx_labels(G, pos, font_size=8)
 
         # hide all axes
@@ -164,8 +188,8 @@ class NetworkEmbeddingModel:
 
         plt.xticks([])
         plt.yticks([])
-        plt.grid(False)
+        plt.grid(True)
 
-        plt.title("Network embedding visualization")
+        plt.title("Network embedding visualization" if title is None else title)
         plt.axis("off")
         plt.show()

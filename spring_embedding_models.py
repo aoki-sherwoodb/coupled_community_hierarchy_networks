@@ -1,6 +1,7 @@
 import numpy as np
 from scipy.stats import multivariate_normal
 from tqdm.auto import tqdm
+import matplotlib.pyplot as plt
 
 from NetworkEmbeddingModel import NetworkEmbeddingModel
 import utils
@@ -474,3 +475,261 @@ class SpringAttentionGenerativeModel:
             number of i -> j edges generated.
         """
         return np.random.poisson(c * np.exp(-self.beta * self.H[i, j]))
+
+
+class SequentialHierarchyCommunitySimple(NetworkEmbeddingModel):
+    def __init__(self, adj_matrix, embedding_dim, beta=1, k=None):
+        """
+        Initialize a model to learn community and hierarchy sequentially from a simple graph.
+
+        Args:
+            adj_matrix: Adjacency matrix of the input graph.
+            embedding_dim: Dimension of the embedding space.
+            beta: Inverse temperature parameter for the model.
+            k: Power of the scaled cosine similarity that controls edge existence probability.
+        """
+        self.adj_matrix = adj_matrix
+        self.embedding_dim = embedding_dim  # d
+        if k is None:
+            k = embedding_dim + 1
+        self.k = k
+        self.beta = beta
+        self.num_nodes = adj_matrix.shape[0]  # n
+        self.embeddings = np.random.randn(
+            self.num_nodes, self.embedding_dim
+        )  # n x d matrix of embedding vectors
+
+    def _edge_prob(self, s, d, i, j):
+        """
+        Compute the probability of an edge between nodes i and j based on their embeddings.
+
+        Args:
+            s: Norm of the embedding vectors.
+            d: Scaled cosine similarity matrix.
+            i: Index of node i.
+            j: Index of node j.
+
+        Returns:
+            Probability of an edge between nodes i and j.
+        """
+        sij = s[i] - s[j]
+        dij = d[i, j]
+        return dij / (1 + np.exp(-2 * self.beta * sij * dij))
+
+    def log_likelihood(self, X):
+        s = np.linalg.norm(X, axis=1)
+        d = utils.scaled_cosine_sim(X, self.k)
+        L = 0.0
+        for i in range(self.num_nodes):
+            for j in range(self.num_nodes):
+                if i == j:
+                    continue
+                pij = self._edge_prob(s, d, i, j)
+                L += self.adj_matrix[i, j] * np.log(pij + 1e-9)
+                L += (1 - self.adj_matrix[i, j]) * np.log(1 - pij + 1e-9)
+        return L
+
+    def numerical_gradient(self, epsilon=1e-5):
+        grad = np.zeros_like(self.embeddings)
+        base = self.log_likelihood(self.embeddings)
+        for i in range(self.num_nodes):
+            for j in range(self.embedding_dim):
+                X_perturb = self.embeddings.copy()
+                X_perturb[i, j] += epsilon
+                new_val = self.log_likelihood(X_perturb)
+                grad[i, j] = (new_val - base) / epsilon
+        return grad
+
+    def optimize_embeddings(self, lr, max_iter=300, anneal=False):
+        """
+        Learn embeddings using annealing gradient descent.
+        """
+        history = []
+        for it in tqdm(range(max_iter)):
+            grad = self.numerical_gradient()
+            alpha = lr / (1 + 0.05 * it) if anneal else lr
+            self.embeddings += alpha * grad
+            ll = self.log_likelihood(self.embeddings)
+            history.append(ll)
+        return (self.embeddings, history)
+
+    def fit(self, lr=0.01, max_iter=300, anneal=False, plot_likelihood=True):
+        """
+        Fit the model to the data using annealing gradient descent.
+        """
+        self.embeddings, history = self.optimize_embeddings(lr, max_iter, anneal)
+
+        if plot_likelihood:
+            plt.plot(history)
+            plt.title("Log Likelihood over Iterations")
+            plt.xlabel("Iteration")
+            plt.ylabel("Log Likelihood")
+            plt.grid(True)
+            plt.show()
+
+        return self.embeddings, history
+
+    def predict(self, i, j):
+        """
+        Calculate the probability of a directed edge i -> j given the model's embeddings.
+        """
+        d = utils.scaled_cosine_sim(self.embeddings, self.k)
+        s = np.linalg.norm(self.embeddings, axis=1)
+        return self._edge_prob(s, d, i, j)
+
+    def generate(self, expected_num_edges):
+        """
+        Generate a synthetic network with the expected number of edges based on the learned embeddings.
+        Args:
+            expected_num_edges: Expected number of edges in the generated graph.
+        Returns:
+            Adjacency matrix of the generated graph.
+        """
+        generated_adj_matrix = np.zeros((self.num_nodes, self.num_nodes))
+        # compute c based on expected number of edges
+        c = 1
+        for i in range(self.num_nodes):
+            for j in range(self.num_nodes):
+                if i == j:
+                    continue
+                generated_adj_matrix = self.predict(i, j, c)
+
+        return generated_adj_matrix
+
+
+class SequentialHierarchyCommunityMulti(NetworkEmbeddingModel):
+    def __init__(self, adj_matrix, embedding_dim, beta=1, k=None):
+        """
+        Initialize a model to learn community and hierarchy sequentially from a simple graph.
+
+        Args:
+            adj_matrix: Adjacency matrix of the input graph.
+            embedding_dim: Dimension of the embedding space.
+            beta: Inverse temperature parameter for the model.
+            k: Power of the scaled cosine similarity that controls edge existence probability.
+        """
+        self.adj_matrix = adj_matrix
+        self.embedding_dim = embedding_dim  # d
+        if k is None:
+            k = embedding_dim + 1
+        self.k = k
+        self.beta = beta
+        self.num_nodes = adj_matrix.shape[0]  # n
+        self.embeddings = np.random.randn(
+            self.num_nodes, self.embedding_dim
+        )  # n x d matrix of embedding vectors
+
+    def _directed_edge_cond_prob(self, s, d, i, j):
+        """
+        Compute the probability of an edge between nodes i and j based on their embeddings.
+
+        Args:
+            s: Norm of the embedding vectors.
+            d: Scaled cosine similarity matrix.
+            i: Index of node i.
+            j: Index of node j.
+
+        Returns:
+            Probability of an edge between nodes i and j.
+        """
+        sij = s[i] - s[j]
+        dij = d[i, j]
+        return 1 / (1 + np.exp(-2 * self.beta * sij * dij))
+
+    def log_likelihood(self, X):
+        s = np.linalg.norm(X, axis=1)
+        d = utils.scaled_cosine_sim(X, self.k)
+        A_bar = self.adj_matrix + self.adj_matrix.T
+        m = np.sum(self.adj_matrix)
+        D = np.sum(d) - np.sum(np.diag(d))
+        L = 0.0
+        for i in range(self.num_nodes):
+            for j in range(self.num_nodes):
+                if i == j:
+                    continue
+                pij = self._directed_edge_cond_prob(s, d, i, j)
+                L += pij * np.log(self.adj_matrix[i, j] + 1e-9) + (1 - pij) * np.log(
+                    self.adj_matrix[j, i] + 1e-9
+                )  # edge direction terms
+                L += (
+                    A_bar[i, j] * np.log(d[i, j] / D + 1e-9) - (2 * m * d[i, j]) / D
+                )  # edge existence terms
+        return L
+
+    def numerical_gradient(self, epsilon=1e-5):
+        grad = np.zeros_like(self.embeddings)
+        base = self.log_likelihood(self.embeddings)
+        for i in range(self.num_nodes):
+            for j in range(self.embedding_dim):
+                X_perturb = self.embeddings.copy()
+                X_perturb[i, j] += epsilon
+                new_val = self.log_likelihood(X_perturb)
+                grad[i, j] = (new_val - base) / epsilon
+        return grad
+
+    def optimize_embeddings(self, lr, max_iter=300, anneal=False):
+        """
+        Learn embeddings using annealing gradient descent.
+        """
+        history = []
+        for it in tqdm(range(max_iter)):
+            grad = self.numerical_gradient()
+            alpha = lr / (1 + 0.05 * it) if anneal else lr
+            self.embeddings += alpha * grad
+            ll = self.log_likelihood(self.embeddings)
+            history.append(ll)
+        return (self.embeddings, history)
+
+    def fit(self, lr=0.01, max_iter=300, anneal=False, plot_likelihood=True):
+        """
+        Fit the model to the data using annealing gradient descent.
+        """
+        self.embeddings, history = self.optimize_embeddings(lr, max_iter, anneal)
+
+        if plot_likelihood:
+            plt.plot(history)
+            plt.title("Log Likelihood over Iterations")
+            plt.xlabel("Iteration")
+            plt.ylabel("Log Likelihood")
+            plt.grid(True)
+            plt.show()
+
+        return self.embeddings, history
+
+    def predict(self, i, j, c=None):
+        """
+        Predict the number of directed edges i -> j given the model's embeddings.
+        Args:
+            i: Index of node i.
+            j: Index of node j.
+            c: Density parameter for the model. If None, it will be estimated from the data.
+        """
+        d = utils.scaled_cosine_sim(self.embeddings, self.k)
+        s = np.linalg.norm(self.embeddings, axis=1)
+        if c is None:
+            c_hat = np.sum(self.adj_matrix + self.adj_matrix.T) / (
+                np.sum(d) - np.sum(np.diag(d))
+            )  # MLE for edge density parameter c
+        else:
+            c_hat = c
+        edge_count = np.random.poisson(c_hat * d[i, j])
+        return np.random.binomial(edge_count, self._directed_edge_cond_prob(s, d, i, j))
+
+    def generate(self, expected_num_edges):
+        """
+        Generate a synthetic network with the expected number of edges based on the learned embeddings.
+        Args:
+            expected_num_edges: Expected number of edges in the generated graph.
+        Returns:
+            Adjacency matrix of the generated graph.
+        """
+        generated_adj_matrix = np.zeros((self.num_nodes, self.num_nodes))
+        # compute c based on expected number of edges
+        c = 1
+        for i in range(self.num_nodes):
+            for j in range(self.num_nodes):
+                if i == j:
+                    continue
+                generated_adj_matrix = self.predict(i, j, c)
+
+        return generated_adj_matrix
