@@ -586,13 +586,14 @@ class SequentialHierarchyCommunitySimple(NetworkEmbeddingModel):
             Adjacency matrix of the generated graph.
         """
         generated_adj_matrix = np.zeros((self.num_nodes, self.num_nodes))
-        # compute c based on expected number of edges
-        c = 1
+        d = utils.scaled_cosine_sim(self.embeddings, self.k)
+        c = expected_num_edges / np.sum(np.triu(d, 1))  # sum over dij for j > i
         for i in range(self.num_nodes):
             for j in range(self.num_nodes):
                 if i == j:
                     continue
-                generated_adj_matrix = self.predict(i, j, c)
+                edge_prob = self.predict(i, j)
+                generated_adj_matrix[i, j] = int(np.random.rand() < c * edge_prob)
 
         return generated_adj_matrix
 
@@ -621,7 +622,7 @@ class SequentialHierarchyCommunityMulti(NetworkEmbeddingModel):
 
     def _directed_edge_cond_prob(self, s, d, i, j):
         """
-        Compute the probability of an edge between nodes i and j based on their embeddings.
+        Compute the probability of an edge i -> j conditioned on the existence of an edge i <-> j.
 
         Args:
             s: Norm of the embedding vectors.
@@ -725,11 +726,12 @@ class SequentialHierarchyCommunityMulti(NetworkEmbeddingModel):
         """
         generated_adj_matrix = np.zeros((self.num_nodes, self.num_nodes))
         # compute c based on expected number of edges
-        c = 1
+        d = utils.scaled_cosine_sim(self.embeddings, self.k)
+        c = expected_num_edges / np.sum(np.triu(d, 1))  # sum over dij for j > i
         for i in range(self.num_nodes):
             for j in range(self.num_nodes):
                 if i == j:
                     continue
-                generated_adj_matrix = self.predict(i, j, c)
+                generated_adj_matrix[i, j] = self.predict(i, j, c)
 
         return generated_adj_matrix
