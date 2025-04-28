@@ -478,7 +478,7 @@ class SpringAttentionGenerativeModel:
 
 
 class SequentialHierarchyCommunitySimple(NetworkEmbeddingModel):
-    def __init__(self, adj_matrix, embedding_dim, alpha=5, beta=1, k=None):
+    def __init__(self, adj_matrix, embedding_dim, alpha=5, beta=1):
         """
         Initialize a model to learn community and hierarchy sequentially from a simple graph.
 
@@ -490,9 +490,6 @@ class SequentialHierarchyCommunitySimple(NetworkEmbeddingModel):
         """
         self.adj_matrix = adj_matrix
         self.embedding_dim = embedding_dim  # d
-        if k is None:
-            k = embedding_dim + 1
-        self.k = k
         self.beta = beta
         self.alpha = alpha
         self.num_nodes = adj_matrix.shape[0]  # n
