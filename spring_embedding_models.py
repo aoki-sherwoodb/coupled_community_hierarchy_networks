@@ -478,7 +478,7 @@ class SpringAttentionGenerativeModel:
 
 
 class SequentialHierarchyCommunitySimple(NetworkEmbeddingModel):
-    def __init__(self, adj_matrix, embedding_dim, beta=1, k=None):
+    def __init__(self, adj_matrix, embedding_dim, alpha=5, beta=1, k=None):
         """
         Initialize a model to learn community and hierarchy sequentially from a simple graph.
 
@@ -494,14 +494,30 @@ class SequentialHierarchyCommunitySimple(NetworkEmbeddingModel):
             k = embedding_dim + 1
         self.k = k
         self.beta = beta
+        self.alpha = alpha
         self.num_nodes = adj_matrix.shape[0]  # n
         self.embeddings = np.random.randn(
             self.num_nodes, self.embedding_dim
         )  # n x d matrix of embedding vectors
 
-    def _edge_prob(self, s, d, i, j):
+    def _edge_existence_prob(self, cos_sim_matrix, i, j):
         """
-        Compute the probability of an edge between nodes i and j based on their embeddings.
+        Compute the probability of an edge existing between nodes i and j based on their embeddings.
+
+        Args:
+            s: Norm of the embedding vectors.
+            d: cosine similarity between the embeddings of node i and j.
+            i: Index of node i.
+            j: Index of node j.
+
+        Returns:
+            Probability of an edge between nodes i and j.
+        """
+        return np.exp(self.alpha * (cos_sim_matrix[i, j] - 1))
+    
+    def _edge_direction_prob(self, s, cos_sim_matrix, i, j):
+        """
+        Compute the probability of an edge from node i to j conditioned on the edge existing.
 
         Args:
             s: Norm of the embedding vectors.
@@ -513,20 +529,20 @@ class SequentialHierarchyCommunitySimple(NetworkEmbeddingModel):
             Probability of an edge between nodes i and j.
         """
         sij = s[i] - s[j]
-        dij = d[i, j]
-        return dij / (1 + np.exp(-2 * self.beta * sij * dij))
+        cos_ij = cos_sim_matrix[i, j]
+        return 1 / (1 + np.exp(-self.beta * (1 + cos_ij) * sij))
 
     def log_likelihood(self, X):
         s = np.linalg.norm(X, axis=1)
-        d = utils.scaled_cosine_sim(X, self.k)
+        cos_sim_matrix = utils.matrix_cosine_sim(X)
         L = 0.0
         for i in range(self.num_nodes):
             for j in range(self.num_nodes):
                 if i == j:
                     continue
-                pij = self._edge_prob(s, d, i, j)
-                L += self.adj_matrix[i, j] * np.log(pij + 1e-9)
-                L += (1 - self.adj_matrix[i, j]) * np.log(1 - pij + 1e-9)
+                L += self.adj_matrix[i, j] * np.log(self._edge_existence_prob(cos_sim_matrix, i, j) * self._edge_direction_prob(s, cos_sim_matrix, i, j) + 1e-9)
+                L += (1 - self.adj_matrix[i, j]) * np.log(1 - self._edge_existence_prob(cos_sim_matrix, i, j) * self._edge_direction_prob(s, cos_sim_matrix, i, j) + 1e-9)
+                # print((1 / alpha * (1 - np.exp(-2 * alpha))) * (1 + np.exp(-beta * sij * (1 + lij))) - np.exp(alpha * (lij - 1)) + 1e-9)
         return L
 
     def numerical_gradient(self, epsilon=1e-5):
@@ -547,8 +563,8 @@ class SequentialHierarchyCommunitySimple(NetworkEmbeddingModel):
         history = []
         for it in tqdm(range(max_iter)):
             grad = self.numerical_gradient()
-            alpha = lr / (1 + 0.05 * it) if anneal else lr
-            self.embeddings += alpha * grad
+            adjusted_lr = lr / (1 + 0.05 * it) if anneal else lr
+            self.embeddings += adjusted_lr * grad
             ll = self.log_likelihood(self.embeddings)
             history.append(ll)
         return (self.embeddings, history)
@@ -573,11 +589,11 @@ class SequentialHierarchyCommunitySimple(NetworkEmbeddingModel):
         """
         Calculate the probability of a directed edge i -> j given the model's embeddings.
         """
-        d = utils.scaled_cosine_sim(self.embeddings, self.k)
+        cos_sim_matrix = utils.matrix_cosine_sim(self.embeddings)
         s = np.linalg.norm(self.embeddings, axis=1)
-        return self._edge_prob(s, d, i, j)
+        return self._edge_existence_prob(cos_sim_matrix, i, j) * self._edge_direction_prob(s, cos_sim_matrix, i, j)
 
-    def generate(self, expected_num_edges):
+    def generate(self, expected_num_edges=None):
         """
         Generate a synthetic network with the expected number of edges based on the learned embeddings.
         Args:
@@ -585,9 +601,12 @@ class SequentialHierarchyCommunitySimple(NetworkEmbeddingModel):
         Returns:
             Adjacency matrix of the generated graph.
         """
+        # Set the expected number of edges to the number of edges in the network
+        if expected_num_edges is None:
+            expected_num_edges = self.adj_matrix.sum()
         generated_adj_matrix = np.zeros((self.num_nodes, self.num_nodes))
-        d = utils.scaled_cosine_sim(self.embeddings, self.k)
-        c = expected_num_edges / np.sum(np.triu(d, 1))  # sum over dij for j > i
+        cos_sim_matrix = utils.matrix_cosine_sim(self.embeddings)
+        c = expected_num_edges / np.sum(np.triu(cos_sim_matrix, 1))  # sum over dij for j > i
         for i in range(self.num_nodes):
             for j in range(self.num_nodes):
                 if i == j:
