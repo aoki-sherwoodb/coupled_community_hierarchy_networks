@@ -697,7 +697,7 @@ class SequentialHierarchyCommunityMulti(NetworkEmbeddingModel):
 
         return self.embeddings, history
 
-    def predict(self, i, j, c=None):
+    def predict_edge_count(self, i, j, c=None):
         """
         Predict the number of directed edges i -> j given the model's embeddings.
         Args:
@@ -710,11 +710,23 @@ class SequentialHierarchyCommunityMulti(NetworkEmbeddingModel):
         if c is None:
             c_hat = np.sum(self.adj_matrix + self.adj_matrix.T) / (
                 np.sum(d) - np.sum(np.diag(d))
-            )  # MLE for edge density parameter c
+            )
         else:
             c_hat = c
         edge_count = np.random.poisson(c_hat * d[i, j])
-        return np.random.binomial(edge_count, self._directed_edge_cond_prob(s, d, i, j))
+        return edge_count
+
+    def predict(self, i, j):
+        """
+        Calculate the probability of a directed edge i -> j conditioned on the existence of an edge i <-> j.
+        Args:
+            i: Index of node i.
+            j: Index of node j.
+        """
+        d = utils.scaled_cosine_sim(self.embeddings, self.k)
+        s = np.linalg.norm(self.embeddings, axis=1)
+
+        return self._directed_edge_cond_prob(s, d, i, j)
 
     def generate(self, expected_num_edges):
         """
@@ -729,9 +741,15 @@ class SequentialHierarchyCommunityMulti(NetworkEmbeddingModel):
         d = utils.scaled_cosine_sim(self.embeddings, self.k)
         c = expected_num_edges / np.sum(np.triu(d, 1))  # sum over dij for j > i
         for i in range(self.num_nodes):
-            for j in range(self.num_nodes):
-                if i == j:
-                    continue
-                generated_adj_matrix[i, j] = self.predict(i, j, c)
+            for j in range(i + 1, self.num_nodes):
+                # draw number of undirected edges between i and j
+                edge_count = self.predict_edge_count(i, j, c)
+                pij = self.predict(i, j)
+                for _ in range(edge_count):
+                    # pick edge direction for each generated edge
+                    if np.random.rand() < pij:
+                        generated_adj_matrix[i, j] += 1
+                    else:
+                        generated_adj_matrix[j, i] += 1
 
         return generated_adj_matrix
