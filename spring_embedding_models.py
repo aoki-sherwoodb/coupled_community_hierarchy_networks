@@ -511,7 +511,7 @@ class SequentialHierarchyCommunitySimple(NetworkEmbeddingModel):
             Probability of an edge between nodes i and j.
         """
         return np.exp(self.alpha * (cos_sim_matrix[i, j] - 1))
-    
+
     def _edge_direction_prob(self, s, cos_sim_matrix, i, j):
         """
         Compute the probability of an edge from node i to j conditioned on the edge existing.
@@ -537,8 +537,17 @@ class SequentialHierarchyCommunitySimple(NetworkEmbeddingModel):
             for j in range(self.num_nodes):
                 if i == j:
                     continue
-                L += self.adj_matrix[i, j] * np.log(self._edge_existence_prob(cos_sim_matrix, i, j) * self._edge_direction_prob(s, cos_sim_matrix, i, j) + 1e-9)
-                L += (1 - self.adj_matrix[i, j]) * np.log(1 - self._edge_existence_prob(cos_sim_matrix, i, j) * self._edge_direction_prob(s, cos_sim_matrix, i, j) + 1e-9)
+                L += self.adj_matrix[i, j] * np.log(
+                    self._edge_existence_prob(cos_sim_matrix, i, j)
+                    * self._edge_direction_prob(s, cos_sim_matrix, i, j)
+                    + 1e-9
+                )
+                L += (1 - self.adj_matrix[i, j]) * np.log(
+                    1
+                    - self._edge_existence_prob(cos_sim_matrix, i, j)
+                    * self._edge_direction_prob(s, cos_sim_matrix, i, j)
+                    + 1e-9
+                )
                 # print((1 / alpha * (1 - np.exp(-2 * alpha))) * (1 + np.exp(-beta * sij * (1 + lij))) - np.exp(alpha * (lij - 1)) + 1e-9)
         return L
 
@@ -588,7 +597,9 @@ class SequentialHierarchyCommunitySimple(NetworkEmbeddingModel):
         """
         cos_sim_matrix = utils.matrix_cosine_sim(self.embeddings)
         s = np.linalg.norm(self.embeddings, axis=1)
-        return self._edge_existence_prob(cos_sim_matrix, i, j) * self._edge_direction_prob(s, cos_sim_matrix, i, j)
+        return self._edge_existence_prob(
+            cos_sim_matrix, i, j
+        ) * self._edge_direction_prob(s, cos_sim_matrix, i, j)
 
     def generate(self, expected_num_edges=None):
         """
@@ -602,8 +613,16 @@ class SequentialHierarchyCommunitySimple(NetworkEmbeddingModel):
         if expected_num_edges is None:
             expected_num_edges = self.adj_matrix.sum()
         generated_adj_matrix = np.zeros((self.num_nodes, self.num_nodes))
-        cos_sim_matrix = utils.matrix_cosine_sim(self.embeddings)
-        c = expected_num_edges / np.sum(np.triu(cos_sim_matrix, 1))  # sum over dij for j > i
+
+        # compute density parameter c based on expected number of edges
+        model_expected_edges = 0.0
+        for i in range(self.num_nodes):
+            for j in range(self.num_nodes):
+                if i == j:
+                    continue
+                model_expected_edges += self.predict(i, j)
+        c = expected_num_edges / model_expected_edges
+
         for i in range(self.num_nodes):
             for j in range(self.num_nodes):
                 if i == j:
@@ -615,7 +634,7 @@ class SequentialHierarchyCommunitySimple(NetworkEmbeddingModel):
 
 
 class SequentialHierarchyCommunityMulti(NetworkEmbeddingModel):
-    def __init__(self, adj_matrix, embedding_dim, beta=1, k=None):
+    def __init__(self, adj_matrix, embedding_dim, beta=1):
         """
         Initialize a model to learn community and hierarchy sequentially from a simple graph.
 
@@ -627,9 +646,6 @@ class SequentialHierarchyCommunityMulti(NetworkEmbeddingModel):
         """
         self.adj_matrix = adj_matrix
         self.embedding_dim = embedding_dim  # d
-        if k is None:
-            k = embedding_dim + 1
-        self.k = k
         self.beta = beta
         self.num_nodes = adj_matrix.shape[0]  # n
         self.embeddings = np.random.randn(
@@ -721,7 +737,7 @@ class SequentialHierarchyCommunityMulti(NetworkEmbeddingModel):
             j: Index of node j.
             c: Density parameter for the model. If None, it will be estimated from the data.
         """
-        d = utils.scaled_cosine_sim(self.embeddings, self.k)
+        d = utils.scaled_cosine_sim(self.embeddings)
         s = np.linalg.norm(self.embeddings, axis=1)
         if c is None:
             c_hat = np.sum(self.adj_matrix + self.adj_matrix.T) / (
@@ -739,7 +755,7 @@ class SequentialHierarchyCommunityMulti(NetworkEmbeddingModel):
             i: Index of node i.
             j: Index of node j.
         """
-        d = utils.scaled_cosine_sim(self.embeddings, self.k)
+        d = utils.scaled_cosine_sim(self.embeddings)
         s = np.linalg.norm(self.embeddings, axis=1)
 
         return self._directed_edge_cond_prob(s, d, i, j)
@@ -754,7 +770,7 @@ class SequentialHierarchyCommunityMulti(NetworkEmbeddingModel):
         """
         generated_adj_matrix = np.zeros((self.num_nodes, self.num_nodes))
         # compute c based on expected number of edges
-        d = utils.scaled_cosine_sim(self.embeddings, self.k)
+        d = utils.scaled_cosine_sim(self.embeddings)
         c = expected_num_edges / np.sum(np.triu(d, 1))  # sum over dij for j > i
         for i in range(self.num_nodes):
             for j in range(i + 1, self.num_nodes):
