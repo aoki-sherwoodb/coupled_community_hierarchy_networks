@@ -671,7 +671,7 @@ class SequentialHierarchyCommunityMulti(NetworkEmbeddingModel):
 
     def log_likelihood(self, X):
         s = np.linalg.norm(X, axis=1)
-        d = utils.scaled_cosine_sim(X, self.k)
+        d = utils.scaled_cosine_sim(X)
         A_bar = self.adj_matrix + self.adj_matrix.T
         m = np.sum(self.adj_matrix)
         D = np.sum(d) - np.sum(np.diag(d))
