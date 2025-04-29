@@ -2,6 +2,8 @@ import numpy as np
 from scipy.stats import multivariate_normal
 from tqdm.auto import tqdm
 import matplotlib.pyplot as plt
+import jax
+import jax.numpy as jnp
 
 from NetworkEmbeddingModel import NetworkEmbeddingModel
 import utils
@@ -485,8 +487,8 @@ class SequentialHierarchyCommunitySimple(NetworkEmbeddingModel):
         Args:
             adj_matrix: Adjacency matrix of the input graph.
             embedding_dim: Dimension of the embedding space.
+            alpha: controls the adherence to community structure
             beta: Inverse temperature parameter for the model.
-            k: Power of the scaled cosine similarity that controls edge existence probability.
         """
         self.adj_matrix = adj_matrix
         self.embedding_dim = embedding_dim  # d
@@ -532,23 +534,35 @@ class SequentialHierarchyCommunitySimple(NetworkEmbeddingModel):
     def log_likelihood(self, X):
         s = np.linalg.norm(X, axis=1)
         cos_sim_matrix = utils.matrix_cosine_sim(X)
-        L = 0.0
-        for i in range(self.num_nodes):
-            for j in range(self.num_nodes):
-                if i == j:
-                    continue
-                L += self.adj_matrix[i, j] * np.log(
-                    self._edge_existence_prob(cos_sim_matrix, i, j)
-                    * self._edge_direction_prob(s, cos_sim_matrix, i, j)
-                    + 1e-9
-                )
-                L += (1 - self.adj_matrix[i, j]) * np.log(
-                    1
-                    - self._edge_existence_prob(cos_sim_matrix, i, j)
-                    * self._edge_direction_prob(s, cos_sim_matrix, i, j)
-                    + 1e-9
-                )
-                # print((1 / alpha * (1 - np.exp(-2 * alpha))) * (1 + np.exp(-beta * sij * (1 + lij))) - np.exp(alpha * (lij - 1)) + 1e-9)
+
+        existence_probs = np.exp(self.alpha * (cos_sim_matrix - 1))
+        s_diff = s[:, None] - s[None, :]
+        direction_probs = 1 / (1 + np.exp(-self.beta * (1 + cos_sim_matrix) * s_diff))
+
+        P = existence_probs * direction_probs
+
+        # No self-loops
+        np.fill_diagonal(P, 0)
+
+        # New vectorized likelihood
+        eps = 1e-9
+        L = np.sum(
+            self.adj_matrix * np.log(P + eps)
+            + (1 - self.adj_matrix) * np.log(1 - P + eps)
+        )
+        # for i in range(self.num_nodes):
+        #     for j in range(self.num_nodes):
+        #         if i == j:
+        #             continue
+        #         L += self.adj_matrix[i, j] * np.log(
+        #             self._edge_existence_prob(cos_sim_matrix, i, j) * self._edge_direction_prob(s, cos_sim_matrix, i, j)
+        #             + 1e-9
+        #         )
+        #         L += (1 - self.adj_matrix[i, j]) * np.log(
+        #             1 - self._edge_existence_prob(cos_sim_matrix, i, j) * self._edge_direction_prob(s, cos_sim_matrix, i, j)
+        #             + 1e-9
+        #         )
+        #         # print((1 / alpha * (1 - np.exp(-2 * alpha))) * (1 + np.exp(-beta * sij * (1 + lij))) - np.exp(alpha * (lij - 1)) + 1e-9)
         return L
 
     def numerical_gradient(self, epsilon=1e-5):
@@ -633,19 +647,128 @@ class SequentialHierarchyCommunitySimple(NetworkEmbeddingModel):
         return generated_adj_matrix
 
 
+class SequentialHierarchyCommunitySimpleJAX(NetworkEmbeddingModel):
+    def __init__(self, adj_matrix, embedding_dim, alpha=5, beta=1):
+        self.adj_matrix = jnp.array(adj_matrix)
+        self.embedding_dim = embedding_dim
+        self.alpha = alpha
+        self.beta = beta
+        self.num_nodes = adj_matrix.shape[0]
+        self.embeddings = jax.random.normal(
+            jax.random.PRNGKey(0), (self.num_nodes, self.embedding_dim)
+        )
+
+    @staticmethod
+    def matrix_cosine_sim(X):
+        X_norm = jnp.linalg.norm(X, axis=1, keepdims=True)
+        X_normalized = X / (X_norm + 1e-9)
+        return X_normalized @ X_normalized.T
+
+    def log_likelihood(self, X):
+        s = jnp.linalg.norm(X, axis=1)
+        cos_sim_matrix = self.matrix_cosine_sim(X)
+
+        existence_probs = jnp.exp(self.alpha * (cos_sim_matrix - 1))
+
+        s_diff = s[:, None] - s[None, :]
+        direction_probs = 1 / (1 + jnp.exp(-self.beta * (1 + cos_sim_matrix) * s_diff))
+
+        P = existence_probs * direction_probs
+
+        eps = 1e-9
+        mask = 1 - jnp.eye(self.num_nodes)
+        P = P * mask
+
+        L = jnp.sum(
+            self.adj_matrix * jnp.log(P + eps)
+            + (1 - self.adj_matrix) * jnp.log(1 - P + eps)
+        )
+
+        return L
+
+    def optimize_embeddings(self, lr, max_iter=300, anneal=False):
+        history = []
+
+        log_likelihood_fn = lambda emb: self.log_likelihood(emb)
+        grad_fn = jax.grad(log_likelihood_fn)
+
+        embeddings = self.embeddings
+
+        for it in tqdm(range(max_iter)):
+            grad = grad_fn(embeddings)
+            adjusted_lr = lr / (1 + 0.05 * it) if anneal else lr
+            embeddings = embeddings + adjusted_lr * grad
+            ll = log_likelihood_fn(embeddings)
+            history.append(ll)
+
+        self.embeddings = embeddings
+        return self.embeddings, history
+
+    def fit(self, lr=0.01, max_iter=300, anneal=False, plot_likelihood=True):
+        self.embeddings, history = self.optimize_embeddings(lr, max_iter, anneal)
+
+        if plot_likelihood:
+            plt.plot(np.array(history))
+            plt.title("Log Likelihood over Iterations")
+            plt.xlabel("Iteration")
+            plt.ylabel("Log Likelihood")
+            plt.grid(True)
+            plt.show()
+
+        return self.embeddings, history
+
+    def predict(self, i, j):
+        s = jnp.linalg.norm(self.embeddings, axis=1)
+        cos_sim_matrix = self.matrix_cosine_sim(self.embeddings)
+
+        existence_prob = jnp.exp(self.alpha * (cos_sim_matrix[i, j] - 1))
+        direction_prob = 1 / (
+            1 + jnp.exp(-self.beta * (1 + cos_sim_matrix[i, j]) * (s[i] - s[j]))
+        )
+
+        return existence_prob * direction_prob
+
+    def generate(self, expected_num_edges=None):
+        cos_sim_matrix = self.matrix_cosine_sim(self.embeddings)
+        existence_probs = jnp.exp(self.alpha * (cos_sim_matrix - 1))
+
+        s = jnp.linalg.norm(self.embeddings, axis=1)
+        s_diff = s[:, None] - s[None, :]
+        direction_probs = 1 / (1 + jnp.exp(-self.beta * (1 + cos_sim_matrix) * s_diff))
+
+        P = existence_probs * direction_probs
+
+        mask = 1 - jnp.eye(self.num_nodes)
+        P = P * mask
+
+        if expected_num_edges is None:
+            expected_num_edges = self.adj_matrix.sum()
+
+        model_expected_edges = jnp.sum(P)
+        c = expected_num_edges / model_expected_edges
+
+        generated_adj = np.array(
+            np.random.rand(self.num_nodes, self.num_nodes) < c * np.array(P)
+        ).astype(int)
+        np.fill_diagonal(generated_adj, 0)
+
+        return generated_adj
+
+
 class SequentialHierarchyCommunityMulti(NetworkEmbeddingModel):
-    def __init__(self, adj_matrix, embedding_dim, beta=1):
+    def __init__(self, adj_matrix, embedding_dim, alpha=5, beta=1):
         """
         Initialize a model to learn community and hierarchy sequentially from a simple graph.
 
         Args:
             adj_matrix: Adjacency matrix of the input graph.
             embedding_dim: Dimension of the embedding space.
+            alpha: controls the adherence to community structure
             beta: Inverse temperature parameter for the model.
-            k: Power of the scaled cosine similarity that controls edge existence probability.
         """
         self.adj_matrix = adj_matrix
         self.embedding_dim = embedding_dim  # d
+        self.alpha = alpha
         self.beta = beta
         self.num_nodes = adj_matrix.shape[0]  # n
         self.embeddings = np.random.randn(
@@ -670,23 +793,44 @@ class SequentialHierarchyCommunityMulti(NetworkEmbeddingModel):
         return 1 / (1 + np.exp(-2 * self.beta * sij * dij))
 
     def log_likelihood(self, X):
+        # s = np.linalg.norm(X, axis=1)
+        # d = utils.scaled_cosine_sim(X)
+        # cos_sim_matrix = utils.matrix_cosine_sim(X)
+        # A_bar = self.adj_matrix + self.adj_matrix.T
+        # m = np.sum(self.adj_matrix)
+        # Z = np.sum(np.triu(np.exp(self.alpha * (cos_sim_matrix - 1)), k=1))
+        # L = 0.0
+        # for i in range(self.num_nodes):
+        #     for j in range(i + 1, self.num_nodes):
+        #         # if i == j:
+        #         #     continue
+        #         pij = self._directed_edge_cond_prob(s, d, i, j)
+        #         L += self.adj_matrix[i, j] * np.log(pij + 1e-9) + (A_bar[i, j] - self.adj_matrix[i, j]) * np.log(1 - pij + 1e-9)  # edge direction terms
+        #         L += A_bar[i, j] * (self.alpha * (cos_sim_matrix[i, j] - 1) - np.log(Z)) - m * np.exp(self.alpha * (cos_sim_matrix[i, j] - 1)) / Z  # edge existence terms
         s = np.linalg.norm(X, axis=1)
+        cos_sim_matrix = utils.matrix_cosine_sim(X)
         d = utils.scaled_cosine_sim(X)
         A_bar = self.adj_matrix + self.adj_matrix.T
         m = np.sum(self.adj_matrix)
-        D = np.sum(d) - np.sum(np.diag(d))
-        L = 0.0
-        for i in range(self.num_nodes):
-            for j in range(self.num_nodes):
-                if i == j:
-                    continue
-                pij = self._directed_edge_cond_prob(s, d, i, j)
-                L += pij * np.log(self.adj_matrix[i, j] + 1e-9) + (1 - pij) * np.log(
-                    self.adj_matrix[j, i] + 1e-9
-                )  # edge direction terms
-                L += (
-                    A_bar[i, j] * np.log(d[i, j] / D + 1e-9) - (2 * m * d[i, j]) / D
-                )  # edge existence terms
+
+        existence_terms = np.exp(self.alpha * (cos_sim_matrix - 1))
+        Z = np.sum(np.triu(existence_terms, k=1))
+
+        s_diff = s[:, None] - s[None, :]
+        directed_probs = 1 / (1 + np.exp(-2 * self.beta * s_diff * d))
+
+        eps = 1e-9
+        L_direction = np.sum(
+            self.adj_matrix * np.log(directed_probs + eps)
+            + (A_bar - self.adj_matrix) * np.log(1 - directed_probs + eps)
+        )
+
+        L_existence = (
+            np.sum(A_bar * (self.alpha * (cos_sim_matrix - 1) - np.log(Z))) - m
+        )
+
+        L = L_direction + L_existence
+
         return L
 
     def numerical_gradient(self, epsilon=1e-5):
@@ -731,21 +875,23 @@ class SequentialHierarchyCommunityMulti(NetworkEmbeddingModel):
 
     def predict_edge_count(self, i, j, c=None):
         """
-        Predict the number of directed edges i -> j given the model's embeddings.
+        Predict the number of edges i <-> j given the model's embeddings.
         Args:
             i: Index of node i.
             j: Index of node j.
             c: Density parameter for the model. If None, it will be estimated from the data.
         """
-        d = utils.scaled_cosine_sim(self.embeddings)
-        s = np.linalg.norm(self.embeddings, axis=1)
+        cos_sim_matrix = utils.matrix_cosine_sim(self.embeddings)
+        m = np.sum(self.adj_matrix)
+        Z = np.sum(np.triu(np.exp(self.alpha * (cos_sim_matrix - 1)), k=1))
         if c is None:
-            c_hat = np.sum(self.adj_matrix + self.adj_matrix.T) / (
-                np.sum(d) - np.sum(np.diag(d))
-            )
+            c_hat = 2 * m / Z
         else:
             c_hat = c
-        edge_count = np.random.poisson(c_hat * d[i, j])
+
+        edge_count = np.random.poisson(
+            c_hat * np.exp(self.alpha * (cos_sim_matrix[i, j] - 1))
+        )
         return edge_count
 
     def predict(self, i, j):
@@ -760,7 +906,7 @@ class SequentialHierarchyCommunityMulti(NetworkEmbeddingModel):
 
         return self._directed_edge_cond_prob(s, d, i, j)
 
-    def generate(self, expected_num_edges):
+    def generate(self, expected_num_edges=None):
         """
         Generate a synthetic network with the expected number of edges based on the learned embeddings.
         Args:
@@ -768,10 +914,23 @@ class SequentialHierarchyCommunityMulti(NetworkEmbeddingModel):
         Returns:
             Adjacency matrix of the generated graph.
         """
+        # Set the expected number of edges to the number of edges in the network
+        if expected_num_edges is None:
+            expected_num_edges = self.adj_matrix.sum()
         generated_adj_matrix = np.zeros((self.num_nodes, self.num_nodes))
+
+        # compute density parameter c based on expected number of edges
+        model_expected_edges = 0.0
+        for i in range(self.num_nodes):
+            for j in range(i + 1, self.num_nodes):
+                # if i == j:
+                #     continue
+                model_expected_edges += self.predict_edge_count(i, j)
+
         # compute c based on expected number of edges
-        d = utils.scaled_cosine_sim(self.embeddings)
-        c = expected_num_edges / np.sum(np.triu(d, 1))  # sum over dij for j > i
+        c = expected_num_edges / model_expected_edges
+
+        # generate the adjacency matrix
         for i in range(self.num_nodes):
             for j in range(i + 1, self.num_nodes):
                 # draw number of undirected edges between i and j
@@ -785,3 +944,120 @@ class SequentialHierarchyCommunityMulti(NetworkEmbeddingModel):
                         generated_adj_matrix[j, i] += 1
 
         return generated_adj_matrix
+
+
+class SequentialHierarchyCommunityMultiJAX(NetworkEmbeddingModel):
+    def __init__(self, adj_matrix, embedding_dim, alpha=5, beta=1):
+        self.adj_matrix = jnp.array(adj_matrix)
+        self.embedding_dim = embedding_dim
+        self.alpha = alpha
+        self.beta = beta
+        self.num_nodes = adj_matrix.shape[0]
+        self.embeddings = jax.random.normal(
+            jax.random.PRNGKey(0), (self.num_nodes, self.embedding_dim)
+        )
+
+    @staticmethod
+    def matrix_cosine_sim(X):
+        X_norm = jnp.linalg.norm(X, axis=1, keepdims=True)
+        X_normalized = X / (X_norm + 1e-9)
+        return X_normalized @ X_normalized.T
+
+    @staticmethod
+    def scaled_cosine_sim(X):
+        cos_sim = SequentialHierarchyCommunityMultiJAX.matrix_cosine_sim(X)
+        return cos_sim
+
+    def log_likelihood(self, X):
+        s = jnp.linalg.norm(X, axis=1)
+        cos_sim_matrix = self.matrix_cosine_sim(X)
+        d = self.scaled_cosine_sim(X)
+        A_bar = self.adj_matrix + self.adj_matrix.T
+        m = jnp.sum(self.adj_matrix)
+
+        existence_terms = jnp.exp(self.alpha * (cos_sim_matrix - 1))
+        Z = jnp.sum(jnp.triu(existence_terms, k=1))
+
+        s_diff = s[:, None] - s[None, :]
+        directed_probs = 1 / (1 + jnp.exp(-2 * self.beta * s_diff * d))
+
+        eps = 1e-9
+        L_direction = jnp.sum(
+            self.adj_matrix * jnp.log(directed_probs + eps)
+            + (A_bar - self.adj_matrix) * jnp.log(1 - directed_probs + eps)
+        )
+
+        L_existence = (
+            jnp.sum(A_bar * (self.alpha * (cos_sim_matrix - 1) - jnp.log(Z))) - m
+        )
+
+        return L_direction + L_existence
+
+    def optimize_embeddings(self, lr, max_iter=300, anneal=False):
+        history = []
+
+        log_likelihood_fn = lambda emb: self.log_likelihood(emb)
+        grad_fn = jax.grad(log_likelihood_fn)
+
+        embeddings = self.embeddings
+
+        for it in tqdm(range(max_iter)):
+            grad = grad_fn(embeddings)
+            adjusted_lr = lr / (1 + 0.05 * it) if anneal else lr
+            embeddings = embeddings + adjusted_lr * grad
+            ll = log_likelihood_fn(embeddings)
+            history.append(ll)
+
+        self.embeddings = embeddings
+        return self.embeddings, history
+
+    def fit(self, lr=0.01, max_iter=300, anneal=False, plot_likelihood=True):
+        self.embeddings, history = self.optimize_embeddings(lr, max_iter, anneal)
+
+        if plot_likelihood:
+            plt.plot(np.array(history))
+            plt.title("Log Likelihood over Iterations")
+            plt.xlabel("Iteration")
+            plt.ylabel("Log Likelihood")
+            plt.grid(True)
+            plt.show()
+
+        return self.embeddings, history
+
+    def predict(self, i, j):
+        s = jnp.linalg.norm(self.embeddings, axis=1)
+        d = self.scaled_cosine_sim(self.embeddings)
+        sij = s[i] - s[j]
+        dij = d[i, j]
+        return 1 / (1 + jnp.exp(-2 * self.beta * sij * dij))
+
+    def generate(self, expected_num_edges=None):
+        cos_sim_matrix = self.matrix_cosine_sim(self.embeddings)
+        existence_terms = jnp.exp(self.alpha * (cos_sim_matrix - 1))
+        Z = jnp.sum(jnp.triu(existence_terms, k=1))
+
+        if expected_num_edges is None:
+            expected_num_edges = self.adj_matrix.sum()
+
+        c = expected_num_edges / jnp.sum(existence_terms)
+        expected_counts = c * existence_terms
+
+        sampled_edge_counts = np.random.poisson(expected_counts)
+
+        s = np.linalg.norm(np.array(self.embeddings), axis=1)
+        d = np.array(self.scaled_cosine_sim(self.embeddings))
+        s_diff = s[:, None] - s[None, :]
+        directed_probs = 1 / (1 + np.exp(-2 * self.beta * s_diff * d))
+
+        generated_adj = np.zeros((self.num_nodes, self.num_nodes))
+
+        for i in range(self.num_nodes):
+            for j in range(i + 1, self.num_nodes):
+                count = sampled_edge_counts[i, j]
+                if count > 0:
+                    draws = np.random.rand(count)
+                    directed = draws < directed_probs[i, j]
+                    generated_adj[i, j] += np.sum(directed)
+                    generated_adj[j, i] += np.sum(~directed)
+
+        return generated_adj
