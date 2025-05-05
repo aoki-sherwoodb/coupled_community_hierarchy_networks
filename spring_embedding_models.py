@@ -947,14 +947,14 @@ class SequentialHierarchyCommunityMulti(NetworkEmbeddingModel):
 
 
 class SequentialHierarchyCommunityMultiJAX(NetworkEmbeddingModel):
-    def __init__(self, adj_matrix, embedding_dim, alpha=5, beta=1):
+    def __init__(self, adj_matrix, embedding_dim, alpha=5, beta=1, random_seed=0):
         self.adj_matrix = jnp.array(adj_matrix)
         self.embedding_dim = embedding_dim
         self.alpha = alpha
         self.beta = beta
         self.num_nodes = adj_matrix.shape[0]
         self.embeddings = jax.random.normal(
-            jax.random.PRNGKey(0), (self.num_nodes, self.embedding_dim)
+            jax.random.PRNGKey(random_seed), (self.num_nodes, self.embedding_dim)
         )
 
     @staticmethod
