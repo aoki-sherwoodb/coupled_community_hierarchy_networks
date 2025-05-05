@@ -100,8 +100,8 @@ class NetworkEmbeddingModel:
 
         Returns:
         --------
-        score : float
-            Score of the clustering based on the specified metric
+        score : float, community_ranks
+            Score of the clustering based on the specified metric and community ranks calculated as average magnitude of embeddings for each community
         """
         assert metric in [
             "nmi",
@@ -130,7 +130,7 @@ class NetworkEmbeddingModel:
             dist_matrix[dist_matrix < 0] = 0
             return silhouette_score(dist_matrix, communities)
 
-    def evaluate_ranks_between_communities(
+    def evaluate_community_ranks(
         self,
         true_community_ranks,
         communities,
@@ -160,9 +160,9 @@ class NetworkEmbeddingModel:
             )
         # Compute the rank correlation between true community ranks and predicted community ranks
         if metric == "spearman":
-            return spearmanr(true_community_ranks, community_ranks)[0]
+            return spearmanr(true_community_ranks, community_ranks)[0], community_ranks
         elif metric == "kendall":
-            return kendalltau(true_community_ranks, community_ranks)[0]
+            return kendalltau(true_community_ranks, community_ranks)[0], community_ranks
 
     def evaluate_ranks_within_communities(
         self,
@@ -250,10 +250,12 @@ class NetworkEmbeddingModel:
 
     def visualize(
         self,
+        ax=None,
         embeddings=None,
         node_labels=None,
         draw_labels=True,
         draw_edges=True,
+        draw_legend=True,
         adj_matrix=None,
         communities=None,
         community_names=None,
@@ -336,7 +338,8 @@ class NetworkEmbeddingModel:
         }
 
         # Plot
-        fig, _ = plt.subplots(figsize=figsize)
+        if ax is None:
+            fig, ax = plt.subplots(figsize=figsize)
 
         if communities is not None:
             # Color nodes by community
@@ -345,30 +348,38 @@ class NetworkEmbeddingModel:
             nx.draw_networkx_nodes(
                 G,
                 pos,
+                ax=ax,
                 node_color=community_colors,
                 # cmap=plt.cm.tab20.colors,
                 node_size=node_sizes,
                 alpha=0.8,
             )
-            legend_elements = [
-                Patch(
-                    facecolor=cmap[i],
-                    label=(
-                        f"Community {i}"
-                        if community_names is None
-                        else community_names[i]
-                    ),
+            if draw_legend:
+                legend_elements = [
+                    Patch(
+                        facecolor=cmap[i],
+                        label=(
+                            f"Community {i}"
+                            if community_names is None
+                            else community_names[i]
+                        ),
+                    )
+                    for i in sorted(set(communities))
+                ]
+                ax.legend(
+                    handles=legend_elements,
+                    loc="lower right",
+                    fontsize=8,
+                    bbox_to_anchor=(1.25, 0.0),
                 )
-                for i in sorted(set(communities))
-            ]
-            plt.legend(handles=legend_elements)
         else:
-            nx.draw_networkx_nodes(G, pos, node_size=node_sizes, alpha=0.8)
+            nx.draw_networkx_nodes(G, pos, ax=ax, node_size=node_sizes, alpha=0.8)
 
         if draw_edges:
             nx.draw_networkx_edges(
                 G,
                 pos,
+                ax=ax,
                 arrowsize=10,
                 connectionstyle="arc3,rad=0.1",
                 edge_color="0.5",
@@ -376,17 +387,16 @@ class NetworkEmbeddingModel:
             )
 
         if draw_labels:
-            nx.draw_networkx_labels(G, pos, font_size=8)
+            nx.draw_networkx_labels(G, pos, ax=ax, font_size=8)
 
         # hide all axes
-        plt.gca().spines[["top", "right"]].set_visible(False)
-        plt.axhline(0, color="black", linewidth=1)
-        plt.axvline(0, color="black", linewidth=1)
+        ax.spines[["top", "right"]].set_visible(False)
+        ax.axhline(0, color="black", linewidth=1)
+        ax.axvline(0, color="black", linewidth=1)
 
-        plt.xticks([])
-        plt.yticks([])
-        plt.grid(True)
+        ax.set_xticks([])
+        ax.set_yticks([])
+        ax.grid(True)
 
-        plt.title("Network embedding visualization" if title is None else title)
-        plt.axis("off")
-        plt.show()
+        ax.set_title("Network embedding visualization" if title is None else title)
+        ax.axis("off")
